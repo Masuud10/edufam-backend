@@ -94,8 +94,9 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
   const user = await prisma.user.findUnique({ where: { email } });
   if (!user) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
 
-  // Prisma schema stores the hashed password in `password` field
-  const valid = await bcrypt.compare(password, user.password || '');
+  // Prisma schema stores the bcrypt hash in `password` field.
+  const storedHash = user.password || '';
+  const valid = await bcrypt.compare(password, storedHash);
   if (!valid) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
 
   // If `isActive` field exists in schema, ensure user is active; otherwise treat as active
@@ -127,6 +128,29 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
     return success(res, { user: safeUser, tokens: { accessToken, refreshToken: refreshTokenPlain, refreshTokenId: refresh.id } }, 200);
   } catch (err) {
     logServerError('login error', err);
+    return error(res, 'SERVER_ERROR', 'Server error', 500);
+  }
+});
+
+// POST /api/auth/register
+// Create a new user and store bcrypt hashed password in `password` column.
+router.post('/register', loginLimiter, async (req, res) => {
+  try {
+    const { email, password, userType = 'school_user', role } = req.body;
+    if (!email || !password || !role) return error(res, 'INVALID_REQUEST', 'Missing required fields', 400);
+
+    const existing = await prisma.user.findUnique({ where: { email } });
+    if (existing) return error(res, 'USER_EXISTS', 'User already exists', 409);
+
+    const hash = await bcrypt.hash(password, parseInt(process.env.BCRYPT_SALT_ROUNDS || '12', 10));
+
+    const user = await prisma.user.create({ data: { email, password: hash, userType, role } });
+
+    // Do not return password in response
+    const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType };
+    return success(res, { user: safeUser }, 201, 'User registered');
+  } catch (err) {
+    logServerError('register error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
