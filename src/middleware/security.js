@@ -6,18 +6,28 @@ const { v4: uuidv4 } = require('uuid');
 
 // CORS middleware factory
 function corsMiddleware() {
+  // Default safe origins (production + local dev). Can be overridden via ALLOWED_ORIGINS env var
+  const defaultAllowed = ['https://www.edufam.org', 'http://localhost:3000'];
   const raw = process.env.ALLOWED_ORIGINS || '';
-  const allowed = raw.split(',').map(s => s.trim()).filter(Boolean);
+  const allowedFromEnv = raw.split(',').map(s => s.trim()).filter(Boolean);
+  const allowed = Array.from(new Set([...(allowedFromEnv.length ? allowedFromEnv : defaultAllowed)]));
+
   return cors({
     origin: function (origin, callback) {
-      // allow non-browser tools (postman) or server-to-server if no origin
+      // allow non-browser tools (Postman, server-to-server) when no origin header is present
       if (!origin) return callback(null, true);
-      if (allowed.length === 0) return callback(null, true); // dev mode: allow all
+      // Allow exact matches from the allowed list
       if (allowed.includes(origin)) return callback(null, true);
-      return callback(new Error('CORS not allowed'));
+      // Not allowed
+      return callback(new Error('CORS not allowed by server'));
     },
-    methods: ['GET','POST','PUT','PATCH','DELETE','OPTIONS'],
-    allowedHeaders: ['Content-Type','Authorization','Accept','X-Request-Id'],
+    // Allowed HTTP methods
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    // Allowed headers (include custom headers required by frontends)
+    allowedHeaders: ['Content-Type', 'Authorization', 'x-portfolio-mode'],
+    // Allow browsers to include credentials (cookies, authorization headers)
+    credentials: true,
+    // Standard preflight handling: do not pass to next handler, respond with 204 on success
     preflightContinue: false,
     optionsSuccessStatus: 204,
   });
