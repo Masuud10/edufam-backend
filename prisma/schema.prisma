@@ -43,6 +43,7 @@ model School {
   // relations
   users     User[]
   classes   Class[]
+  academicYears AcademicYear[]
 
   @@index([name])
 }
@@ -63,6 +64,8 @@ model User {
   // sessions and tokens
   refreshTokens RefreshToken[]
   sessions      UserSession[]
+  // Relation for classes where the user is the teacher
+  teachingClasses Class[] @relation("ClassTeacher")
 
   @@index([schoolId])
 }
