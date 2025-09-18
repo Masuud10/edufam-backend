@@ -73,12 +73,14 @@ model User {
 model RefreshToken {
   id        String   @id @default(uuid())
   token     String   @unique
+  tokenFingerprint String @db.VarChar(64)
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   userId    String
   expiresAt DateTime
   createdAt DateTime @default(now())
 
   @@index([userId])
+  @@index([tokenFingerprint])
 }
 
 model UserSession {

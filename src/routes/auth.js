@@ -43,9 +43,30 @@ function generateRefreshTokenValue() {
   return crypto.randomBytes(48).toString('hex');
 }
 
+function fingerprintForToken(plain) {
+  return crypto.createHash('sha256').update(plain).digest('hex');
+}
+
 async function hashToken(token) {
   const rounds = parseInt(process.env.BCRYPT_SALT_ROUNDS || '12', 10);
   return bcrypt.hash(token, rounds);
+}
+
+// Helper: create refresh token record but gracefully fall back if the DB does
+// not yet have the `tokenFingerprint` column (Prisma P2022). This allows the
+// backend to continue working during a migration window.
+async function createRefreshTokenRecord(data) {
+  try {
+    return await prisma.refreshToken.create({ data });
+  } catch (e) {
+    // Prisma error when column is missing
+    if (e && e.code === 'P2022' && e.meta && e.meta.column === 'tokenFingerprint') {
+      // Remove tokenFingerprint and retry
+      const { tokenFingerprint, ...rest } = data;
+      return await prisma.refreshToken.create({ data: rest });
+    }
+    throw e;
+  }
 }
 
 // POST /api/auth/login
@@ -68,18 +89,19 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
 
     // generate tokens
     const accessToken = signAccessToken(user);
-    const refreshTokenPlain = generateRefreshTokenValue();
-    const refreshTokenHash = await hashToken(refreshTokenPlain);
+  const refreshTokenPlain = generateRefreshTokenValue();
+  const refreshTokenHash = await hashToken(refreshTokenPlain);
+  const refreshTokenFingerprint = fingerprintForToken(refreshTokenPlain);
     const refreshTokenDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
     const expiresAt = new Date(Date.now() + refreshTokenDays * 24 * 60 * 60 * 1000);
 
     // Prisma RefreshToken model stores token in `token` (we store the hashed token here)
-    const refresh = await prisma.refreshToken.create({
-      data: {
-        userId: user.id,
-        token: refreshTokenHash,
-        expiresAt,
-      }
+    // Use resilient create helper in case DB doesn't include tokenFingerprint yet.
+    const refresh = await createRefreshTokenRecord({
+      userId: user.id,
+      token: refreshTokenHash,
+      tokenFingerprint: refreshTokenFingerprint,
+      expiresAt,
     });
 
     const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType, firstName: user.firstName, lastName: user.lastName, schoolId: user.schoolId };
@@ -92,39 +114,116 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
 });
 
 // POST /api/auth/refresh
+// Helper: find refresh token record by plain token (compat for frontends that don't store ID)
+async function findRefreshTokenRecordByPlain(plain) {
+  if (!plain) return null;
+  const fp = fingerprintForToken(plain);
+  // Try indexed lookup by fingerprint first; if the column is missing, fall
+  // back to scanning non-expired tokens and bcrypt comparing them.
+  try {
+    const candidates = await prisma.refreshToken.findMany({ where: { tokenFingerprint: fp, expiresAt: { gt: new Date() } } });
+    for (const c of candidates) {
+      try {
+        const ok = await bcrypt.compare(plain, c.token || '');
+        if (ok) return c;
+      } catch (e) {
+        // ignore compare errors
+      }
+    }
+  } catch (e) {
+    if (e && e.code === 'P2022' && e.meta && e.meta.column === 'tokenFingerprint') {
+      // Column missing: full scan of non-expired tokens
+      const candidates = await prisma.refreshToken.findMany({ where: { expiresAt: { gt: new Date() } } });
+      for (const c of candidates) {
+        try {
+          const ok = await bcrypt.compare(plain, c.token || '');
+          if (ok) return c;
+        } catch (err) {
+          // ignore
+        }
+      }
+    } else {
+      throw e;
+    }
+  }
+
+  return null;
+}
+
+async function rotateRefreshTokenAndRespond(res, existingRecord, providedPlain) {
+  // existingRecord must be a Prisma RefreshToken record
+  if (!existingRecord) return error(res, 'INVALID_REFRESH', 'Refresh token not found', 401);
+  if (existingRecord.expiresAt && existingRecord.expiresAt <= new Date()) return error(res, 'REFRESH_EXPIRED', 'Refresh token expired', 401);
+
+  // If providedPlain is present, verify it matches stored hash
+  if (providedPlain) {
+    const matches = await bcrypt.compare(providedPlain, existingRecord.token || '');
+    if (!matches) {
+      // revoke/delete this token to be safe
+      await prisma.refreshToken.delete({ where: { id: existingRecord.id } }).catch(() => {});
+      return error(res, 'INVALID_REFRESH', 'Refresh token invalid', 401);
+    }
+  }
+
+  // rotation: delete old token and issue a new one
+  await prisma.refreshToken.delete({ where: { id: existingRecord.id } });
+
+  const user = await prisma.user.findUnique({ where: { id: existingRecord.userId } });
+  if (!user) return error(res, 'USER_NOT_FOUND', 'User not found', 401);
+
+  const accessToken = signAccessToken(user);
+  const newPlain = generateRefreshTokenValue();
+  const newHash = await hashToken(newPlain);
+  const newFingerprint = fingerprintForToken(newPlain);
+  const refreshTokenDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
+  const expiresAt = new Date(Date.now() + refreshTokenDays * 24 * 60 * 60 * 1000);
+
+  const newRefresh = await createRefreshTokenRecord({ userId: user.id, token: newHash, tokenFingerprint: newFingerprint, expiresAt });
+
+  const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType, firstName: user.firstName, lastName: user.lastName, schoolId: user.schoolId };
+
+  return success(res, { user: safeUser, tokens: { accessToken, refreshToken: newPlain, refreshTokenId: newRefresh.id } }, 200);
+}
+
+// POST /api/auth/refresh (keeps original name)
 router.post('/refresh', refreshLimiter, refreshValidator, async (req, res) => {
   try {
     const { refreshTokenId, refreshToken } = req.body;
-    const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
-    if (!existing) return error(res, 'INVALID_REFRESH', 'Refresh token not found', 401);
-    if (existing.expiresAt && existing.expiresAt <= new Date()) return error(res, 'REFRESH_EXPIRED', 'Refresh token expired', 401);
-
-    const matches = await bcrypt.compare(refreshToken, existing.token || '');
-    if (!matches) {
-      // revoke/delete this token to be safe
-      await prisma.refreshToken.delete({ where: { id: refreshTokenId } }).catch(() => {});
-      return error(res, 'INVALID_REFRESH', 'Refresh token invalid', 401);
+    if (refreshTokenId) {
+      const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
+      return await rotateRefreshTokenAndRespond(res, existing, refreshToken);
     }
 
-    // rotation: delete old token and issue a new one
-    await prisma.refreshToken.delete({ where: { id: refreshTokenId } });
+    // Fallback: try to find by plain token
+    if (refreshToken) {
+      const existing = await findRefreshTokenRecordByPlain(refreshToken);
+      return await rotateRefreshTokenAndRespond(res, existing, refreshToken);
+    }
 
-  const user = await prisma.user.findUnique({ where: { id: existing.userId } });
-    if (!user) return error(res, 'USER_NOT_FOUND', 'User not found', 401);
-
-    const accessToken = signAccessToken(user);
-    const newPlain = generateRefreshTokenValue();
-    const newHash = await hashToken(newPlain);
-    const refreshTokenDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
-    const expiresAt = new Date(Date.now() + refreshTokenDays * 24 * 60 * 60 * 1000);
-
-  const newRefresh = await prisma.refreshToken.create({ data: { userId: user.id, token: newHash, expiresAt } });
-
-    const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType, firstName: user.firstName, lastName: user.lastName, schoolId: user.schoolId };
-
-    return success(res, { user: safeUser, tokens: { accessToken, refreshToken: newPlain, refreshTokenId: newRefresh.id } }, 200);
+    return error(res, 'INVALID_REQUEST', 'Missing refresh token', 400);
   } catch (err) {
     console.error('refresh error', err);
+    return error(res, 'SERVER_ERROR', 'Server error', 500);
+  }
+});
+
+// POST /api/auth/refresh-token (compatibility alias used by frontends)
+router.post('/refresh-token', refreshLimiter, refreshValidator, async (req, res) => {
+  try {
+    const { refreshTokenId, refreshToken } = req.body;
+    if (refreshTokenId) {
+      const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
+      return await rotateRefreshTokenAndRespond(res, existing, refreshToken);
+    }
+
+    if (refreshToken) {
+      const existing = await findRefreshTokenRecordByPlain(refreshToken);
+      return await rotateRefreshTokenAndRespond(res, existing, refreshToken);
+    }
+
+    return error(res, 'INVALID_REQUEST', 'Missing refresh token', 400);
+  } catch (err) {
+    console.error('refresh-token error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
@@ -132,12 +231,28 @@ router.post('/refresh', refreshLimiter, refreshValidator, async (req, res) => {
 // POST /api/auth/logout
 router.post('/logout', logoutLimiter, logoutValidator, async (req, res) => {
   try {
-    const { refreshTokenId } = req.body;
-    const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
+    const { refreshTokenId, refreshToken } = req.body;
+    let existing = null;
+    if (refreshTokenId) {
+      existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
+    } else if (refreshToken) {
+      // find by comparing hashes (only consider non-expired tokens)
+      const candidates = await prisma.refreshToken.findMany({ where: { expiresAt: { gt: new Date() } } });
+      for (const c of candidates) {
+        try {
+          const ok = await bcrypt.compare(refreshToken, c.token || '');
+          if (ok) {
+            existing = c;
+            break;
+          }
+        } catch (e) {}
+      }
+    }
+
     if (!existing) return error(res, 'INVALID_REFRESH', 'Refresh token not found', 404);
 
     // revoke by deleting
-    await prisma.refreshToken.delete({ where: { id: refreshTokenId } });
+    await prisma.refreshToken.delete({ where: { id: existing.id } });
 
     return success(res, { message: 'Logged out' }, 200);
   } catch (err) {

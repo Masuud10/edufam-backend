@@ -13,20 +13,25 @@ const loginValidator = [
 ];
 
 const refreshValidator = [
-  body('refreshTokenId').isUUID().withMessage('Invalid refreshTokenId'),
-  body('refreshToken').isString().withMessage('refreshToken required'),
+  // Allow either refreshTokenId (UUID) OR refreshToken (string) for compatibility with older frontends
+  body('refreshTokenId').optional().isUUID().withMessage('Invalid refreshTokenId'),
+  body('refreshToken').optional().isString().withMessage('refreshToken must be a string'),
   (req, res, next) => {
     const errs = validationResult(req);
     if (!errs.isEmpty()) return error(res, 'VALIDATION_ERROR', 'Validation failed', 422, { errors: errs.array() });
+    if (!req.body.refreshTokenId && !req.body.refreshToken) return error(res, 'VALIDATION_ERROR', 'Validation failed', 422, { errors: [{ msg: 'Either refreshTokenId or refreshToken is required' }] });
     next();
   }
 ];
 
 const logoutValidator = [
-  body('refreshTokenId').isUUID().withMessage('Invalid refreshTokenId'),
+  // Allow either refreshTokenId or refreshToken (plain) to support older frontends
+  body('refreshTokenId').optional().isUUID().withMessage('Invalid refreshTokenId'),
+  body('refreshToken').optional().isString().withMessage('refreshToken must be a string'),
   (req, res, next) => {
     const errs = validationResult(req);
     if (!errs.isEmpty()) return error(res, 'VALIDATION_ERROR', 'Validation failed', 422, { errors: errs.array() });
+    if (!req.body.refreshTokenId && !req.body.refreshToken) return error(res, 'VALIDATION_ERROR', 'Validation failed', 422, { errors: [{ msg: 'Either refreshTokenId or refreshToken is required' }] });
     next();
   }
 ];

@@ -11,7 +11,8 @@
     "prisma:migrate:dev": "npx prisma migrate dev --name init",
     "prisma:migrate:deploy": "npx prisma migrate deploy",
     "prisma:studio": "npx prisma studio",
-    "seed:admin": "node scripts/seed-admin.js"
+    "seed:admin": "node scripts/seed-admin.js",
+    "seed:demo": "node scripts/seed-demo-school.js"
   },
   "dependencies": {
     "@prisma/client": "^5.0.0",

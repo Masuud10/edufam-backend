@@ -1,0 +1,5 @@
+// NOTE: This file is a leftover temporary artifact from an earlier edit.
+// The canonical test script is `test-login-seeded-users.js` (without the `.new` suffix).
+// You can safely remove this file if you want; it is intentionally left as a stub to avoid accidental deletion.
+
+module.exports = {};
