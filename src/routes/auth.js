@@ -28,6 +28,22 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
+// Structured error logger to surface Prisma codes/meta and stacks for debugging.
+function logServerError(context, err) {
+  try {
+    if (!err) return console.error(`${context} unknown error`);
+    // Log the full stack if available
+    if (err.stack) console.error(`${context} stack`, err.stack);
+    // Log Prisma error code/meta if present
+    if (err.code) console.error(`${context} code`, err.code, 'meta', err.meta || {});
+    // Fallback to printing the error object
+    console.error(`${context} error`, typeof err === 'object' ? err : String(err));
+  } catch (e) {
+    // Ensure logging never throws
+    console.error('logServerError failure', e);
+  }
+}
+
 const loginLimiter = createRateLimiter({ max: 10, windowMs: 60 * 1000 });
 const refreshLimiter = createRateLimiter({ max: 30, windowMs: 60 * 1000 });
 const logoutLimiter = createRateLimiter({ max: 30, windowMs: 60 * 1000 });
@@ -61,6 +77,8 @@ async function createRefreshTokenRecord(data) {
   } catch (e) {
     // Prisma error when column is missing
     if (e && e.code === 'P2022' && e.meta && e.meta.column === 'tokenFingerprint') {
+      // Column missing: warn and remove tokenFingerprint then retry
+      console.warn('tokenFingerprint column missing in DB - falling back to create without fingerprint');
       // Remove tokenFingerprint and retry
       const { tokenFingerprint, ...rest } = data;
       return await prisma.refreshToken.create({ data: rest });
@@ -108,7 +126,7 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
 
     return success(res, { user: safeUser, tokens: { accessToken, refreshToken: refreshTokenPlain, refreshTokenId: refresh.id } }, 200);
   } catch (err) {
-    console.error('login error', err);
+    logServerError('login error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
@@ -132,7 +150,8 @@ async function findRefreshTokenRecordByPlain(plain) {
     }
   } catch (e) {
     if (e && e.code === 'P2022' && e.meta && e.meta.column === 'tokenFingerprint') {
-      // Column missing: full scan of non-expired tokens
+      // Column missing: full scan of non-expired tokens (slower)
+      console.warn('tokenFingerprint column missing in DB - falling back to full scan on refresh token lookup');
       const candidates = await prisma.refreshToken.findMany({ where: { expiresAt: { gt: new Date() } } });
       for (const c of candidates) {
         try {
@@ -202,7 +221,7 @@ router.post('/refresh', refreshLimiter, refreshValidator, async (req, res) => {
 
     return error(res, 'INVALID_REQUEST', 'Missing refresh token', 400);
   } catch (err) {
-    console.error('refresh error', err);
+    logServerError('refresh error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
@@ -223,7 +242,7 @@ router.post('/refresh-token', refreshLimiter, refreshValidator, async (req, res)
 
     return error(res, 'INVALID_REQUEST', 'Missing refresh token', 400);
   } catch (err) {
-    console.error('refresh-token error', err);
+    logServerError('refresh-token error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
@@ -256,7 +275,7 @@ router.post('/logout', logoutLimiter, logoutValidator, async (req, res) => {
 
     return success(res, { message: 'Logged out' }, 200);
   } catch (err) {
-    console.error('logout error', err);
+    logServerError('logout error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
@@ -268,7 +287,7 @@ router.get('/me', authenticate, async (req, res) => {
     const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType, firstName: user.firstName, lastName: user.lastName, schoolId: user.schoolId };
     return success(res, { user: safeUser }, 200);
   } catch (err) {
-    console.error('me error', err);
+    logServerError('me error', err);
     return error(res, 'SERVER_ERROR', 'Server error', 500);
   }
 });
