@@ -1,0 +1,145 @@
+// Prisma schema scaffolded for Edufam Phase 1
+// Datasource and generator
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum UserType {
+  school_user
+  admin_user
+}
+
+enum Role {
+  // school_user roles
+  school_director
+  principal
+  teacher
+  hr
+  finance
+  parent
+
+  // admin_user roles
+  super_admin
+  sales_marketing
+  support_hr
+  admin_finance
+  engineer
+}
+
+// Models
+model School {
+  id        String   @id @default(uuid())
+  name      String
+  address   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // relations
+  users     User[]
+  classes   Class[]
+
+  @@index([name])
+}
+
+model User {
+  id         String   @id @default(uuid())
+  email      String   @unique
+  password   String
+  firstName  String?
+  lastName   String?
+  userType   UserType
+  role       Role
+  school     School?  @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  schoolId   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  // sessions and tokens
+  refreshTokens RefreshToken[]
+  sessions      UserSession[]
+
+  @@index([schoolId])
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model UserSession {
+  id         String   @id @default(uuid())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId     String
+  userAgent  String?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model AcademicYear {
+  id        String   @id @default(uuid())
+  school    School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  schoolId  String
+  name      String
+  startDate DateTime
+  endDate   DateTime
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  terms     AcademicTerm[]
+
+  @@index([schoolId])
+}
+
+model AcademicTerm {
+  id             String   @id @default(uuid())
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id], onDelete: Cascade)
+  academicYearId String
+  name           String
+  startDate      DateTime
+  endDate        DateTime
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([academicYearId])
+}
+
+model Class {
+  id         String   @id @default(uuid())
+  school     School   @relation(fields: [schoolId], references: [id], onDelete: Cascade)
+  schoolId   String
+  name       String
+  teacher    User?    @relation("ClassTeacher", fields: [teacherId], references: [id], onDelete: SetNull)
+  teacherId  String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  subjects   Subject[]
+
+  @@index([schoolId])
+}
+
+model Subject {
+  id        String   @id @default(uuid())
+  class     Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  classId   String
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([classId])
+}
