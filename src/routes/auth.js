@@ -17,7 +17,8 @@
 require('dotenv').config();
 const express = require('express');
 const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
+// Use bcryptjs for easier cross-platform installs (no native build required)
+const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const prisma = require('../lib/prisma');
 const { success, error } = require('../utils/response');
@@ -51,16 +52,19 @@ async function hashToken(token) {
 router.post('/login', loginLimiter, loginValidator, async (req, res) => {
   try {
     const { email, password } = req.body;
-    const user = await prisma.user.findUnique({ where: { email } });
-    if (!user) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
+  const user = await prisma.user.findUnique({ where: { email } });
+  if (!user) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
 
-    const valid = await bcrypt.compare(password, user.passwordHash || '');
-    if (!valid) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
+  // Prisma schema stores the hashed password in `password` field
+  const valid = await bcrypt.compare(password, user.password || '');
+  if (!valid) return error(res, 'INVALID_CREDENTIALS', 'Invalid email or password', 401);
 
-    if (!user.isActive) return error(res, 'USER_INACTIVE', 'User is inactive', 403);
+  // If `isActive` field exists in schema, ensure user is active; otherwise treat as active
+  if (typeof user.isActive !== 'undefined' && !user.isActive) return error(res, 'USER_INACTIVE', 'User is inactive', 403);
 
     // create session
-    const session = await prisma.userSession.create({ data: { userId: user.id, ip: req.ip || '', userAgent: req.get('User-Agent') || '' } });
+  // Create a session record: Prisma model uses ipAddress and userAgent
+  const session = await prisma.userSession.create({ data: { userId: user.id, ipAddress: req.ip || '', userAgent: req.get('User-Agent') || '' } });
 
     // generate tokens
     const accessToken = signAccessToken(user);
@@ -69,12 +73,12 @@ router.post('/login', loginLimiter, loginValidator, async (req, res) => {
     const refreshTokenDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
     const expiresAt = new Date(Date.now() + refreshTokenDays * 24 * 60 * 60 * 1000);
 
+    // Prisma RefreshToken model stores token in `token` (we store the hashed token here)
     const refresh = await prisma.refreshToken.create({
       data: {
         userId: user.id,
-        tokenHash: refreshTokenHash,
+        token: refreshTokenHash,
         expiresAt,
-        userSessionId: session.id,
       }
     });
 
@@ -93,20 +97,19 @@ router.post('/refresh', refreshLimiter, refreshValidator, async (req, res) => {
     const { refreshTokenId, refreshToken } = req.body;
     const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
     if (!existing) return error(res, 'INVALID_REFRESH', 'Refresh token not found', 401);
-    if (existing.revokedAt) return error(res, 'REFRESH_REVOKED', 'Refresh token revoked', 401);
     if (existing.expiresAt && existing.expiresAt <= new Date()) return error(res, 'REFRESH_EXPIRED', 'Refresh token expired', 401);
 
-    const matches = await bcrypt.compare(refreshToken, existing.tokenHash || '');
+    const matches = await bcrypt.compare(refreshToken, existing.token || '');
     if (!matches) {
-      // revoke this token to be safe
-      await prisma.refreshToken.update({ where: { id: refreshTokenId }, data: { revokedAt: new Date() } });
+      // revoke/delete this token to be safe
+      await prisma.refreshToken.delete({ where: { id: refreshTokenId } }).catch(() => {});
       return error(res, 'INVALID_REFRESH', 'Refresh token invalid', 401);
     }
 
-    // rotation: revoke old token and issue a new one
-    await prisma.refreshToken.update({ where: { id: refreshTokenId }, data: { revokedAt: new Date() } });
+    // rotation: delete old token and issue a new one
+    await prisma.refreshToken.delete({ where: { id: refreshTokenId } });
 
-    const user = await prisma.user.findUnique({ where: { id: existing.userId } });
+  const user = await prisma.user.findUnique({ where: { id: existing.userId } });
     if (!user) return error(res, 'USER_NOT_FOUND', 'User not found', 401);
 
     const accessToken = signAccessToken(user);
@@ -115,7 +118,7 @@ router.post('/refresh', refreshLimiter, refreshValidator, async (req, res) => {
     const refreshTokenDays = parseInt(process.env.REFRESH_TOKEN_DAYS || '30', 10);
     const expiresAt = new Date(Date.now() + refreshTokenDays * 24 * 60 * 60 * 1000);
 
-    const newRefresh = await prisma.refreshToken.create({ data: { userId: user.id, tokenHash: newHash, expiresAt, userSessionId: existing.userSessionId } });
+  const newRefresh = await prisma.refreshToken.create({ data: { userId: user.id, token: newHash, expiresAt } });
 
     const safeUser = { id: user.id, email: user.email, role: user.role, userType: user.userType, firstName: user.firstName, lastName: user.lastName, schoolId: user.schoolId };
 
@@ -133,12 +136,8 @@ router.post('/logout', logoutLimiter, logoutValidator, async (req, res) => {
     const existing = await prisma.refreshToken.findUnique({ where: { id: refreshTokenId } });
     if (!existing) return error(res, 'INVALID_REFRESH', 'Refresh token not found', 404);
 
-    await prisma.refreshToken.update({ where: { id: refreshTokenId }, data: { revokedAt: new Date() } });
-
-    // optionally: close session
-    if (existing.userSessionId) {
-      await prisma.userSession.update({ where: { id: existing.userSessionId }, data: { endedAt: new Date() } }).catch(() => {});
-    }
+    // revoke by deleting
+    await prisma.refreshToken.delete({ where: { id: refreshTokenId } });
 
     return success(res, { message: 'Logged out' }, 200);
   } catch (err) {
